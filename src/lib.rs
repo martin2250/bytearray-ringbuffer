@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), no_std)]
+#![doc = include_str!("../README.md")]
 
 pub struct BytearrayRingbuffer<const N: usize> {
     buffer: [u8; N],
@@ -14,6 +15,7 @@ pub struct BytearrayRingbuffer<const N: usize> {
 pub struct NotEnoughSpaceError;
 
 impl<const N: usize> BytearrayRingbuffer<N> {
+    /// create empty `BytearrayRingbuffer`
     pub const fn new() -> Self {
         assert!(N > 8);
         assert!(N < (u32::MAX as usize));
@@ -30,12 +32,12 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         self.bytes_unused().saturating_sub(8)
     }
 
-    /// add entry, returns false if there was not enough space
+    /// add element, returns `NotEnoughSpaceError` if there is not enough space available
     pub fn push(&mut self, data: &[u8]) -> Result<(), NotEnoughSpaceError> {
         self._push(data, false)
     }
 
-    /// add entry, discard old entries if there was not enough space
+    /// add element, discards oldest elements until `data` fits. Only when data is too large to fit the buffer (ie `data.len() > N - 8`), returns `NotEnoughSpaceError`
     pub fn push_force(&mut self, data: &[u8]) -> Result<(), NotEnoughSpaceError> {
         self._push(data, true)
     }
@@ -84,6 +86,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         Ok(())
     }
 
+    /// retrieve the oldest element, removing it from the buffer
     pub fn pop_front(&mut self) -> Option<(&[u8], &[u8])> {
         if self.empty {
             return None;
@@ -106,6 +109,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         Some((a, b))
     }
 
+    /// iterate over all items, starting with the newest one
     pub fn iter_backwards<'a>(&'a self) -> IterBackwards<'a, N> {
         IterBackwards {
             buffer: &self.buffer,
@@ -115,6 +119,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         }
     }
 
+    /// iterate over all items, starting with the oldest one
     pub fn iter<'a>(&'a self) -> Iter<'a, N> {
         Iter {
             buffer: &self.buffer,
@@ -124,13 +129,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         }
     }
 
-    /// return the number of valid entries
+    /// return the number of entries
     pub fn count(&self) -> usize {
-        self.iter_backwards().count()
+        self.iter().count()
     }
 
+    /// obtain the n-th entry
     pub fn nth(&self, n: usize) -> Option<(&[u8], &[u8])> {
-        self.iter_backwards().nth(n)
+        self.iter().nth(n)
     }
 }
 

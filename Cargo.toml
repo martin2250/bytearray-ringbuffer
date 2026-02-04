@@ -2,14 +2,13 @@
 name = "bytearray-ringbuffer"
 version = "0.1.0"
 edition = "2024"
-
+authors = ["Martin Pittermann"]
 license = "MIT OR Apache-2.0"
-description = "A simple hello world library for demonstration"
-documentation = "https://docs.rs/hello-world-lib"
-homepage = "https://github.com/yourusername/hello-world-lib"
-repository = "https://github.com/yourusername/hello-world-lib"
+description = "a no_std and no-alloc ring buffer for variable-length byte slices in rust "
+documentation = "https://docs.rs/bytearray-ringbuffer"
+repository = "https://github.com/martin2250/bytearray-ringbuffer"
 readme = "README.md"
-keywords = ["hello", "world", "example", "demo", "tutorial"]
-categories = ["development-tools", "no-std"]
+keywords = ["no_std", "no-alloc", "heapless", "embedded", "ringbuffer"]
+categories = ["data-structures", "no-std::no-alloc"]
 
 [dependencies]
