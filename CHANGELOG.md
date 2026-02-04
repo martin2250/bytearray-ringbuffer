@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-04
+
+### Added
+- `nth_reverse(n: usize)` function
+
+### Changed
+- `BytearrayRingbuffer` now keeps count of the number of entries stored, making `count()` much faster
+
 ## [0.2.0] - 2026-02-04
 
 ### Added

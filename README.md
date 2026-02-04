@@ -1,3 +1,5 @@
+[![crates.io](https://img.shields.io/crates/v/bytearray-ringbuffer.svg)](https://crates.io/crates/bytearray-ringbuffer)
+[![crates.io](https://img.shields.io/crates/d/bytearray-ringbuffer.svg)](https://crates.io/crates/bytearray-ringbuffer)
 # Bytearray-Ringbuffer
 
 An embedded-friendly `VecDeque<Vec<u8>>`.
@@ -43,5 +45,5 @@ The tradeoff here is that elements can't be accessed without iterating through t
 |`push()` | O(1)
 |`pop()` | O(1)
 |`iter()` | O(1)
-|`count()` | O(N)
+|`count()` | O(1)
 |`nth(n)` | O(N)

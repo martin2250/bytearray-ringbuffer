@@ -7,8 +7,8 @@ pub struct BytearrayRingbuffer<const N: usize> {
     head: usize,
     /// points to where the oldest packet starts
     tail: usize,
-    /// resolves ambiguity between head == tail for empty and full
-    empty: bool,
+    /// number of packets in buffer
+    count: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -23,7 +23,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
             buffer: [0; N],
             head: 0,
             tail: 0,
-            empty: true,
+            count: 0,
         }
     }
 
@@ -42,9 +42,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         self._push(data, true)
     }
 
+    #[inline(always)]
+    pub const fn empty(&self) -> bool {
+        self.count == 0
+    }
+
     /// number of bytes are currently not in use
     const fn bytes_unused(&self) -> usize {
-        if self.empty {
+        if self.empty() {
             N
         } else if self.head > self.tail {
             N + self.tail - self.head
@@ -81,14 +86,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         write_wrapping(&mut self.buffer, addr_c, &len_buffer);
 
         self.head = add_wrapping::<N>(self.head, 8 + data.len());
-        self.empty = false;
+        self.count += 1;
 
         Ok(())
     }
 
     /// retrieve the oldest element, removing it from the buffer
     pub fn pop_front(&mut self) -> Option<(&[u8], &[u8])> {
-        if self.empty {
+        if self.empty() {
             return None;
         }
         let mut len_buffer = [0; 4];
@@ -105,7 +110,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         };
 
         self.tail = add_wrapping::<N>(self.tail, len + 8);
-        self.empty = self.head == self.tail;
+        self.count -= 1;
         Some((a, b))
     }
 
@@ -114,8 +119,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         IterBackwards {
             buffer: &self.buffer,
             head: self.head,
-            tail: self.tail,
-            empty: self.empty,
+            count: self.count,
         }
     }
 
@@ -125,13 +129,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
             buffer: &self.buffer,
             head: self.head,
             tail: self.tail,
-            empty: self.empty,
+            count: self.count,
         }
     }
 
     /// return the number of entries
-    pub fn count(&self) -> usize {
-        self.iter().count()
+    #[inline(always)]
+    pub const fn count(&self) -> usize {
+        self.count
     }
 
     /// obtain the n-th entry
@@ -139,9 +144,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         self.iter().nth(n)
     }
 
+    /// obtain the n-th entry, starting from the newest entry
+    pub fn nth_reverse(&self, n: usize) -> Option<(&[u8], &[u8])> {
+        self.iter_backwards().nth(n)
+    }
+
     /// obtain the n-th entry, rolling the buffer around in case the element wraps around at the end of the buffer
     pub fn nth_contiguous(&mut self, mut n: usize) -> Option<&[u8]> {
-        if self.empty {
+        if self.empty() {
             return None;
         }
 
@@ -179,15 +189,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
 pub struct IterBackwards<'a, const N: usize> {
     buffer: &'a [u8; N],
     head: usize,
-    tail: usize,
-    empty: bool,
+    count: usize,
 }
 
 impl<'a, const N: usize> Iterator for IterBackwards<'a, N> {
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.empty {
+        if self.count == 0 {
             return None;
         }
 
@@ -218,7 +227,7 @@ impl<'a, const N: usize> Iterator for IterBackwards<'a, N> {
         };
 
         self.head = sub_wrapping::<N>(self.head, 8 + len_data);
-        self.empty = self.head == self.tail;
+        self.count -= 1;
 
         Some((slice_a, slice_b))
     }
@@ -234,14 +243,14 @@ pub struct Iter<'a, const N: usize> {
     buffer: &'a [u8; N],
     head: usize,
     tail: usize,
-    empty: bool,
+    count: usize,
 }
 
 impl<'a, const N: usize> Iterator for Iter<'a, N> {
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.empty {
+        if self.count == 0 {
             return None;
         }
 
@@ -272,7 +281,7 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
         };
 
         self.tail = add_wrapping::<N>(self.tail, 8 + len_data);
-        self.empty = self.head == self.tail;
+        self.count -= 1;
 
         Some((slice_a, slice_b))
     }
