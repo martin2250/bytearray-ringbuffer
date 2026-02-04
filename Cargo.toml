@@ -1,0 +1,15 @@
+[package]
+name = "bytearray-ringbuffer"
+version = "0.1.0"
+edition = "2024"
+
+license = "MIT OR Apache-2.0"
+description = "A simple hello world library for demonstration"
+documentation = "https://docs.rs/hello-world-lib"
+homepage = "https://github.com/yourusername/hello-world-lib"
+repository = "https://github.com/yourusername/hello-world-lib"
+readme = "README.md"
+keywords = ["hello", "world", "example", "demo", "tutorial"]
+categories = ["development-tools", "no-std"]
+
+[dependencies]
