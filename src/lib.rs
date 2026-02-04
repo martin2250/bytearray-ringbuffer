@@ -138,6 +138,42 @@ impl<const N: usize> BytearrayRingbuffer<N> {
     pub fn nth(&self, n: usize) -> Option<(&[u8], &[u8])> {
         self.iter().nth(n)
     }
+
+    /// obtain the n-th entry, rolling the buffer around in case the element wraps around at the end of the buffer
+    pub fn nth_contiguous(&mut self, mut n: usize) -> Option<&[u8]> {
+        if self.empty {
+            return None;
+        }
+
+        // iterate through buffer until we find this one
+        let mut tail = self.tail;
+        let len_data = loop {
+            let mut buf = [0u8; 4];
+            read_wrapping(&self.buffer, tail, &mut buf);
+            let len_data = u32::from_ne_bytes(buf) as usize;
+
+            if n == 0 {
+                break len_data;
+            }
+            n -= 1;
+
+            tail = add_wrapping::<N>(tail, len_data + 8);
+        };
+
+        let index_data = add_wrapping::<N>(tail, 4);
+
+        // happy path, no rotate necessary
+        if index_data + len_data <= N {
+            return Some(&self.buffer[index_data..index_data + len_data]);
+        }
+
+        // otherwise rotate
+        self.buffer.rotate_left(index_data);
+        self.tail = sub_wrapping::<N>(self.tail, index_data);
+        self.head = sub_wrapping::<N>(self.head, index_data);
+
+        Some(&self.buffer[..len_data])
+    }
 }
 
 pub struct IterBackwards<'a, const N: usize> {
@@ -471,5 +507,32 @@ mod tests {
         test_with_readback::<24>(&["0", "1", "abcde", "2", "3", "4"]);
         test_with_readback::<24>(&["0", "1", "abcdef", "2", "3", "4"]);
         test_with_readback::<24>(&["0", "1", "abcdefg", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn rotate_contiguous() {
+        const N: usize = 48;
+        let data: [&[u8]; _] = [b"012345", b"hello world", b"xyz"];
+
+        for offset in 0..N {
+            let mut buf = BytearrayRingbuffer::<N>::new();
+            buf.head = offset;
+            buf.tail = offset;
+
+            for &d in &data {
+                buf.push(d).unwrap();
+            }
+
+            let read = buf.nth_contiguous(1).unwrap();
+            assert_eq!(data[1], read);
+
+            // check if the contents are still the same
+            for (&r, (a, b)) in data.iter().zip(buf.iter()) {
+                let mut out = Vec::new();
+                out.extend_from_slice(a);
+                out.extend_from_slice(b);
+                assert_eq!(out.as_slice(), r);
+            }
+        }
     }
 }

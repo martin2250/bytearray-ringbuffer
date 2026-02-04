@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-04
+
+### Added
+- Documentation
+- `nth_contiguous(n: usize)` function to read an element as contiguous slice without allocating another buffer.
+
 ### Changed
 - `nth()` now interprets the index from oldest to newest
 
