@@ -11,10 +11,15 @@ Each slice `data` uses up `data.len() + 8` bytes in the buffer.
 
 This is useful for efficiently storing elements of very different lengths, as short elements do not have to be padded.
 
-One downside is that elements may always wrap around at the end of the buffer.
-When reading, therefore, always two slices `(a, b)` are returned.
+One downside is that elements may wrap around at the end of the buffer.
+For `pop_front`, `iter`, `iter_backwards`, `nth`, and `nth_reverse`, each element is returned as two slices `(a, b)`.
 If the element does not wrap around, `a` will contain all data and `b` will be empty.
 Otherwise, `a` and `b` have to be concatenated to yield the full result.
+`nth_contiguous` is the exception: it returns a single `&[u8]` and may rotate the backing array so that slice is contiguous. It returns `None` if the queue is empty or if `n >= count()`.
+
+## MSRV
+
+Rust **1.85** or later (`edition = "2024"`).
 
 ## Usage
 ```rust
@@ -27,7 +32,7 @@ buffer.push(b"").unwrap();
 buffer.push(b"testing").unwrap();
 // number of packets
 assert_eq!(buffer.count(), 3);
-// retrieve 
+// iterate (oldest first; does not remove entries)
 for (a, b) in buffer.iter() {
     // a and b are &[u8]
     let mut output = Vec::new();
@@ -38,12 +43,18 @@ for (a, b) in buffer.iter() {
 ```
 
 ## Performance
-The tradeoff here is that elements can't be accessed without iterating through the buffer.
+The tradeoff here is that random access by index (`nth`, `nth_reverse`, `nth_contiguous`) walks packets from an end of the queue, so it is linear in the number of packets skipped.
 
 |operation|time complexity|
 |---------|---------------|
 |`push()` | O(1)
-|`pop()` | O(1)
-|`iter()` | O(1)
+|`push_force()` | O(1) amortized per push; worst case O(m) if m oldest packets are dropped to make room
+|`pop_front()` | O(1)
+|`iter()` / `iter_backwards()` | O(1) to create the iterator; O(1) per `next()`; O(k) to visit all k packets
 |`count()` | O(1)
-|`nth(n)` | O(N)
+|`nth(n)` / `nth_reverse(n)` | O(n) in the index n (packets walked)
+|`nth_contiguous(n)` | O(n) to locate the packet, plus O(N) if the buffer is rotated
+
+## Changelog
+
+See [`CHANGELOG.md`](https://github.com/martin2250/bytearray-ringbuffer/blob/master/CHANGELOG.md) in the repository.

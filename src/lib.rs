@@ -1,21 +1,42 @@
 #![cfg_attr(not(test), no_std)]
+#![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+/// Fixed-capacity FIFO of variable-length byte slices, backed by `[u8; N]` with no heap allocation.
+///
+/// Each stored packet uses `data.len() + 8` bytes: a leading `u32` length (native endian), the
+/// payload, then the same length again. The queue is a ring: `head` is where the next `push` writes;
+/// `tail` is the oldest packet. Payloads may wrap across the end of the array; most accessors return
+/// two slices `(a, b)` that concatenate to the full packet.
+///
+/// The backing array is only modified by this crate's own logic (the field is private). Methods
+/// maintain consistent framing; [`Self::pop_front`] and iterators rely on that.
+///
+/// Compile-time requirements: `N > 8` and `N < u32::MAX` (see [`Self::new`]).
 pub struct BytearrayRingbuffer<const N: usize> {
     buffer: [u8; N],
-    /// points to where the next packet will be written
+    /// Byte index in `buffer` where the next [`Self::push`] will begin writing.
     head: usize,
-    /// points to where the oldest packet starts
+    /// Byte index in `buffer` where the oldest packet begins.
     tail: usize,
-    /// number of packets in buffer
+    /// Number of packets currently stored.
     count: usize,
 }
 
+/// Returned when a [`BytearrayRingbuffer::push`] cannot store `data` without dropping older packets.
+///
+/// For [`BytearrayRingbuffer::push`], this means the unused region is too small. For
+/// [`BytearrayRingbuffer::push_force`], this is only returned when `data.len() > N - 8` (a single
+/// packet cannot fit in the buffer at all).
 #[derive(Copy, Clone, Debug)]
 pub struct NotEnoughSpaceError;
 
 impl<const N: usize> BytearrayRingbuffer<N> {
-    /// create empty `BytearrayRingbuffer`
+    /// Creates an empty ring buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics at compile time if `N <= 8` or `N >= u32::MAX`.
     pub const fn new() -> Self {
         assert!(N > 8);
         assert!(N < (u32::MAX as usize));
@@ -27,27 +48,46 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         }
     }
 
-    /// number of bytes available for payload, 8 bytes for header + end are already subtracted
+    /// Returns the largest payload length that can fit in the currently unused byte range, after
+    /// accounting for the 8-byte packet framing (two `u32` lengths).
+    ///
+    /// Computed from the unused span between write and read positions, minus `8`, saturated at zero.
     pub const fn free(&self) -> usize {
         self.bytes_unused().saturating_sub(8)
     }
 
-    /// add element, returns `NotEnoughSpaceError` if there is not enough space available
+    /// Appends `data` as the newest packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotEnoughSpaceError`] if fewer than `data.len() + 8` bytes are unused.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len() > u32::MAX` (debug assertion).
     pub fn push(&mut self, data: &[u8]) -> Result<(), NotEnoughSpaceError> {
         self._push(data, false)
     }
 
-    /// add element, discards oldest elements until `data` fits. Only when data is too large to fit the buffer (ie `data.len() > N - 8`), returns `NotEnoughSpaceError`
+    /// Appends `data` as the newest packet, dropping the oldest packets until there is room.
+    ///
+    /// Unlike [`Self::push`], this never fails for lack of space as long as a single packet can fit
+    /// in the backing array (`data.len() <= N - 8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotEnoughSpaceError`] only when `data.len() > N - 8` (one frame cannot fit at all).
     pub fn push_force(&mut self, data: &[u8]) -> Result<(), NotEnoughSpaceError> {
         self._push(data, true)
     }
 
+    /// Returns `true` if there are no packets stored.
     #[inline(always)]
     pub const fn empty(&self) -> bool {
         self.count == 0
     }
 
-    /// number of bytes are currently not in use
+    /// Number of bytes in the ring between `head` and `tail` that do not belong to any packet.
     const fn bytes_unused(&self) -> usize {
         if self.empty() {
             N
@@ -91,7 +131,10 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         Ok(())
     }
 
-    /// retrieve the oldest element, removing it from the buffer
+    /// Removes and returns the oldest packet.
+    ///
+    /// The payload may be split across the end of the backing array; concatenate the two slices to
+    /// reconstruct `data`. If the payload is contiguous, the second slice is empty.
     pub fn pop_front(&mut self) -> Option<(&[u8], &[u8])> {
         if self.empty() {
             return None;
@@ -114,7 +157,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         Some((a, b))
     }
 
-    /// iterate over all items, starting with the newest one
+    /// Borrows the buffer and yields packets from newest to oldest.
     pub fn iter_backwards<'a>(&'a self) -> IterBackwards<'a, N> {
         IterBackwards {
             buffer: &self.buffer,
@@ -123,7 +166,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         }
     }
 
-    /// iterate over all items, starting with the oldest one
+    /// Borrows the buffer and yields packets from oldest to newest.
     pub fn iter<'a>(&'a self) -> Iter<'a, N> {
         Iter {
             buffer: &self.buffer,
@@ -133,25 +176,35 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         }
     }
 
-    /// return the number of entries
+    /// Returns how many packets are stored.
     #[inline(always)]
     pub const fn count(&self) -> usize {
         self.count
     }
 
-    /// obtain the n-th entry
+    /// Returns the `n`-th packet in oldest-to-newest order (`n == 0` is the oldest).
+    ///
+    /// Same as [`Iterator::nth`] on [`Self::iter`].
     pub fn nth(&self, n: usize) -> Option<(&[u8], &[u8])> {
         self.iter().nth(n)
     }
 
-    /// obtain the n-th entry, starting from the newest entry
+    /// Returns the `n`-th packet in newest-to-oldest order (`n == 0` is the newest).
+    ///
+    /// Same as [`Iterator::nth`] on [`Self::iter_backwards`].
     pub fn nth_reverse(&self, n: usize) -> Option<(&[u8], &[u8])> {
         self.iter_backwards().nth(n)
     }
 
-    /// obtain the n-th entry, rolling the buffer around in case the element wraps around at the end of the buffer
+    /// Returns the `n`-th packet in oldest-to-newest order as a single contiguous slice.
+    ///
+    /// If the payload already lies in one contiguous range of the backing array, returns that
+    /// subslice. If it wraps around the end of the ring, rotates the array in place so the payload is
+    /// contiguous at the front, adjusts internal indices, and returns a prefix of the array.
+    ///
+    /// `n == 0` is the oldest packet. Returns [`None`] if the buffer is empty or if `n >= count()`.
     pub fn nth_contiguous(&mut self, mut n: usize) -> Option<&[u8]> {
-        if self.empty() {
+        if self.empty() || n >= self.count {
             return None;
         }
 
@@ -186,6 +239,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
     }
 }
 
+/// Iterator over packets from newest to oldest. See [`BytearrayRingbuffer::iter_backwards`].
 pub struct IterBackwards<'a, const N: usize> {
     buffer: &'a [u8; N],
     head: usize,
@@ -239,6 +293,7 @@ impl<const N: usize> Default for BytearrayRingbuffer<N> {
     }
 }
 
+/// Iterator over packets from oldest to newest. See [`BytearrayRingbuffer::iter`].
 pub struct Iter<'a, const N: usize> {
     buffer: &'a [u8; N],
     head: usize,
@@ -254,21 +309,21 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
             return None;
         }
 
-        // check how many bytes are valid
-        let bytes_used = if self.head > self.tail {
+        // Occupied span (same as `N - bytes_unused()` for a non-empty queue).
+        let bytes_unused = if self.head > self.tail {
             N + self.tail - self.head
         } else {
             self.tail - self.head
         };
-        let bytes_valid = N - bytes_used;
-        debug_assert!(bytes_valid >= 8);
+        let bytes_occupied = N - bytes_unused;
+        debug_assert!(bytes_occupied >= 8);
 
-        // read length of newest packet
+        // Oldest packet length at `tail`.
         let mut buf = [0u8; 4];
         read_wrapping(self.buffer, self.tail, &mut buf);
         let len_data = u32::from_ne_bytes(buf) as usize;
         debug_assert!((len_data + 8) <= N);
-        debug_assert!((len_data + 8) <= bytes_valid);
+        debug_assert!((len_data + 8) <= bytes_occupied);
 
         // read out data
         let index_data = add_wrapping::<N>(self.tail, 4);
@@ -304,7 +359,7 @@ fn sub_wrapping<const N: usize>(addr: usize, offset: usize) -> usize {
     }
 }
 
-/// write data to buffer, starting at index and wrapping around at the end of the buffer
+/// Copies `data` into `buffer` starting at `index`, continuing at index `0` if the write crosses the end.
 fn write_wrapping(buffer: &mut [u8], index: usize, data: &[u8]) {
     let first = (buffer.len() - index).min(data.len());
     buffer[index..index + first].copy_from_slice(&data[..first]);
@@ -313,6 +368,7 @@ fn write_wrapping(buffer: &mut [u8], index: usize, data: &[u8]) {
     }
 }
 
+/// Fills `data` from `buffer` starting at `index`, wrapping to index `0` when the read crosses the end.
 fn read_wrapping(buffer: &[u8], index: usize, data: &mut [u8]) {
     let first = (buffer.len() - index).min(data.len());
     data[..first].copy_from_slice(&buffer[index..index + first]);
@@ -516,6 +572,15 @@ mod tests {
         test_with_readback::<24>(&["0", "1", "abcde", "2", "3", "4"]);
         test_with_readback::<24>(&["0", "1", "abcdef", "2", "3", "4"]);
         test_with_readback::<24>(&["0", "1", "abcdefg", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn nth_contiguous_out_of_range_returns_none() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        assert_eq!(buf.count(), 1);
+
+        assert_eq!(buf.nth_contiguous(1), None);
     }
 
     #[test]

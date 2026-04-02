@@ -1,10 +1,11 @@
 [package]
 name = "bytearray-ringbuffer"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Martin Pittermann"]
 license = "MIT OR Apache-2.0"
-description = "a no_std and no-alloc ring buffer for variable-length byte slices in rust "
+description = "A no_std, no-alloc ring buffer for variable-length byte slices in Rust"
 documentation = "https://docs.rs/bytearray-ringbuffer"
 repository = "https://github.com/martin2250/bytearray-ringbuffer"
 readme = "README.md"
