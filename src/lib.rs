@@ -937,4 +937,267 @@ mod tests {
             assert_eq!(collect(a, b), b"suffix");
         }
     }
+
+    // ---- pop_front / empty / count lifecycle ----
+
+    #[test]
+    fn pop_front_empty_returns_none() {
+        let mut buf = BytearrayRingbuffer::<32>::new();
+        assert_eq!(buf.pop_front(), None);
+    }
+
+    #[test]
+    fn empty_and_count_lifecycle() {
+        let mut buf = BytearrayRingbuffer::<32>::new();
+
+        // Fresh buffer is empty with count 0.
+        assert!(buf.empty());
+        assert_eq!(buf.count(), 0);
+
+        buf.push(b"a").unwrap();
+        assert!(!buf.empty());
+        assert_eq!(buf.count(), 1);
+
+        buf.push(b"b").unwrap();
+        assert!(!buf.empty());
+        assert_eq!(buf.count(), 2);
+
+        buf.pop_front().unwrap();
+        assert!(!buf.empty());
+        assert_eq!(buf.count(), 1);
+
+        buf.pop_front().unwrap();
+        assert!(buf.empty());
+        assert_eq!(buf.count(), 0);
+
+        // pop on now-empty buffer returns None.
+        assert_eq!(buf.pop_front(), None);
+    }
+
+    #[test]
+    fn default_creates_empty_buffer() {
+        let buf = BytearrayRingbuffer::<32>::default();
+        assert!(buf.empty());
+        assert_eq!(buf.count(), 0);
+        assert_eq!(buf.free(), 32 - 8);
+    }
+
+    // ---- oversized payload rejection ----
+
+    #[test]
+    fn push_oversized_returns_error() {
+        let mut buf = BytearrayRingbuffer::<16>::new();
+        // Maximum payload is N-8 = 8 bytes; 9 bytes must be rejected.
+        let oversized = [0u8; 9];
+        assert!(buf.push(&oversized).is_err());
+        // Buffer must remain unmodified.
+        assert!(buf.empty());
+    }
+
+    #[test]
+    fn push_force_oversized_returns_error() {
+        let mut buf = BytearrayRingbuffer::<16>::new();
+        // Even push_force must reject payloads larger than N-8.
+        let oversized = [0u8; 9];
+        assert!(buf.push_force(&oversized).is_err());
+        assert!(buf.empty());
+    }
+
+    // ---- iter / iter_backwards on empty buffer ----
+
+    #[test]
+    fn iter_empty_buffer() {
+        let buf = BytearrayRingbuffer::<32>::new();
+        assert_eq!(buf.iter().next(), None);
+    }
+
+    #[test]
+    fn iter_backwards_empty_buffer() {
+        let buf = BytearrayRingbuffer::<32>::new();
+        assert_eq!(buf.iter_backwards().next(), None);
+    }
+
+    // ---- nth / nth_reverse ----
+
+    #[test]
+    fn nth_empty_returns_none() {
+        let buf = BytearrayRingbuffer::<32>::new();
+        assert_eq!(buf.nth(0), None);
+    }
+
+    #[test]
+    fn nth_out_of_bounds_returns_none() {
+        let buf = {
+            let mut b = BytearrayRingbuffer::<64>::new();
+            b.push(b"x").unwrap();
+            b.push(b"y").unwrap();
+            b
+        };
+        assert_eq!(buf.nth(2), None);
+        assert_eq!(buf.nth(100), None);
+    }
+
+    #[test]
+    fn nth_reverse_basic() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"oldest").unwrap();
+        buf.push(b"middle").unwrap();
+        buf.push(b"newest").unwrap();
+
+        let (a, b) = buf.nth_reverse(0).unwrap();
+        assert_eq!(collect(a, b), b"newest");
+        let (a, b) = buf.nth_reverse(1).unwrap();
+        assert_eq!(collect(a, b), b"middle");
+        let (a, b) = buf.nth_reverse(2).unwrap();
+        assert_eq!(collect(a, b), b"oldest");
+    }
+
+    #[test]
+    fn nth_reverse_empty_returns_none() {
+        let buf = BytearrayRingbuffer::<32>::new();
+        assert_eq!(buf.nth_reverse(0), None);
+    }
+
+    #[test]
+    fn nth_reverse_out_of_bounds_returns_none() {
+        let buf = {
+            let mut b = BytearrayRingbuffer::<64>::new();
+            b.push(b"only").unwrap();
+            b
+        };
+        assert_eq!(buf.nth_reverse(1), None);
+        assert_eq!(buf.nth_reverse(99), None);
+    }
+
+    // ---- nth_contiguous ----
+
+    #[test]
+    fn nth_contiguous_empty_returns_none() {
+        let mut buf = BytearrayRingbuffer::<32>::new();
+        assert_eq!(buf.nth_contiguous(0), None);
+    }
+
+    #[test]
+    fn nth_contiguous_n0_no_rotation() {
+        // Packet at the beginning of the buffer – no rotation needed.
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        buf.push(b"world").unwrap();
+        // n=0 is the oldest packet, which starts at index 4 (after its 4-byte header).
+        // It is contiguous, so the buffer should not be rotated.
+        let slice = buf.nth_contiguous(0).unwrap();
+        assert_eq!(slice, b"hello");
+        // Remaining packets are still accessible.
+        let slice = buf.nth_contiguous(1).unwrap();
+        assert_eq!(slice, b"world");
+    }
+
+    #[test]
+    fn nth_contiguous_called_twice() {
+        // After the first nth_contiguous triggers a rotation, the second call must
+        // still return the correct data for the (now relocated) packet.
+        const N: usize = 48;
+        for offset in 0..N {
+            let mut buf = BytearrayRingbuffer::<N>::new();
+            buf.head = offset;
+            buf.tail = offset;
+
+            buf.push(b"alpha").unwrap();
+            buf.push(b"beta").unwrap();
+            buf.push(b"gamma").unwrap();
+
+            // First call (may or may not trigger a rotation depending on offset).
+            let slice = buf.nth_contiguous(1).unwrap();
+            assert_eq!(slice, b"beta");
+
+            // Second call on the same (possibly rotated) buffer.
+            let slice = buf.nth_contiguous(2).unwrap();
+            assert_eq!(slice, b"gamma");
+
+            // Forward iteration must still be consistent.
+            let payloads: Vec<Vec<u8>> = buf
+                .iter()
+                .map(|(a, b)| {
+                    let mut v = a.to_vec();
+                    v.extend_from_slice(b);
+                    v
+                })
+                .collect();
+            assert_eq!(payloads[0], b"alpha");
+            assert_eq!(payloads[1], b"beta");
+            assert_eq!(payloads[2], b"gamma");
+        }
+    }
+
+    // ---- free() edge cases ----
+
+    #[test]
+    fn free_returns_zero_when_full() {
+        // N=32, two packets of 8-byte payload each fill the buffer exactly (2×16 = 32).
+        let mut buf = BytearrayRingbuffer::<32>::new();
+        buf.push(b"01234567").unwrap();
+        buf.push(b"01234567").unwrap();
+        assert_eq!(buf.free(), 0);
+        // A third push must fail.
+        assert!(buf.push(b"x").is_err());
+    }
+
+    // ---- push_force dropping multiple packets ----
+
+    #[test]
+    fn push_force_drops_multiple_packets() {
+        // N=32; fill with three 1-byte packets (each 9 bytes → 27 bytes used, 5 bytes free).
+        // A 16-byte payload needs 24 bytes (16 + 8 overhead).  Dropping "a" frees 9 → 14 free
+        // (still < 24); dropping "b" → 23 free (still < 24); dropping "c" → 32 free (≥ 24).
+        // So all three old packets are evicted and only the new one survives.
+        let mut buf = BytearrayRingbuffer::<32>::new();
+        buf.push(b"a").unwrap();
+        buf.push(b"b").unwrap();
+        buf.push(b"c").unwrap();
+        assert_eq!(buf.count(), 3);
+
+        let payload = b"0123456789abcdef"; // 16 bytes
+        buf.push_force(payload).unwrap();
+
+        // Only the newly pushed packet must survive.
+        assert_eq!(buf.count(), 1);
+        let (a, b) = buf.pop_front().unwrap();
+        assert_eq!(collect(a, b), payload);
+    }
+
+    // ---- multipart: total payload exceeds N-8 ----
+
+    #[test]
+    fn multipart_push_total_exceeds_max_returns_error() {
+        // Buffer size 16: max payload = 16-8 = 8 bytes.
+        // Push 5 bytes then try to push 4 more (total 9 > 8) – must fail.
+        let mut buf = BytearrayRingbuffer::<16>::new();
+        let mut mp = buf.push_multipart().unwrap();
+        mp.push(b"abcde").unwrap(); // 5 bytes – fine
+        let err = mp.push(b"wxyz"); // would bring total to 9 > 8
+        assert!(err.is_err());
+        drop(mp); // commits the 5-byte partial packet
+        assert_eq!(buf.count(), 1);
+        let (a, b) = buf.pop_front().unwrap();
+        assert_eq!(collect(a, b), b"abcde");
+    }
+
+    // ---- push_multipart_force starting from a completely full buffer ----
+
+    #[test]
+    fn multipart_force_full_buffer_start() {
+        // N=16, fill with the maximum-size single packet (8-byte payload).
+        // push_multipart_force must drop it to reserve space for the header.
+        let mut buf = BytearrayRingbuffer::<16>::new();
+        buf.push(&[0u8; 8]).unwrap(); // fills the entire 16-byte buffer
+        assert_eq!(buf.bytes_unused(), 0);
+
+        let mut mp = buf.push_multipart_force();
+        mp.push(b"hi").unwrap();
+        drop(mp);
+
+        assert_eq!(buf.count(), 1);
+        let (a, b) = buf.pop_front().unwrap();
+        assert_eq!(collect(a, b), b"hi");
+    }
 }
