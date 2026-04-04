@@ -31,6 +31,100 @@ pub struct BytearrayRingbuffer<const N: usize> {
 #[derive(Copy, Clone, Debug)]
 pub struct NotEnoughSpaceError;
 
+/// Guard returned by [`BytearrayRingbuffer::push_multipart`] and
+/// [`BytearrayRingbuffer::push_multipart_force`].
+///
+/// Accumulates payload bytes written via repeated [`Self::push`] calls. When dropped, the
+/// completed packet (header + payload + footer) is committed to the ring buffer. Call
+/// [`Self::cancel`] to discard the in-progress write without committing a packet.
+///
+/// In force mode any existing packets that were displaced to make room are permanently lost, even
+/// if the write is cancelled.
+pub struct MultipartPush<'a, const N: usize> {
+    buf: &'a mut BytearrayRingbuffer<N>,
+    /// Ring index where the 4-byte header will be written on finalise.
+    start: usize,
+    /// Payload bytes written so far.
+    len: usize,
+    /// Whether to drop old packets when space is tight.
+    force: bool,
+    /// Set by [`Self::cancel`]; prevents [`Drop`] from committing the packet.
+    cancelled: bool,
+}
+
+impl<'a, const N: usize> MultipartPush<'a, N> {
+    /// Appends `data` to the packet currently being written.
+    ///
+    /// May be called multiple times. The chunks are concatenated in order.
+    ///
+    /// In normal mode returns [`NotEnoughSpaceError`] when there is not enough space in the buffer
+    /// to fit `data` plus the 4-byte footer. In force mode it drops the oldest packets until there
+    /// is room.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotEnoughSpaceError`] if:
+    /// - The total accumulated payload would exceed `N - 8` (the maximum for any single packet).
+    /// - In normal mode: there is not enough unused space.
+    /// - In force mode: even after dropping all existing packets there is still not enough space
+    ///   (meaning the total accumulated payload exceeds what can fit in the buffer).
+    pub fn push(&mut self, data: &[u8]) -> Result<(), NotEnoughSpaceError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        // Absolute ceiling: a single packet can never hold more than N-8 bytes.
+        if self.len + data.len() > N - 8 {
+            return Err(NotEnoughSpaceError);
+        }
+
+        // Need room for data + 4-byte footer.
+        let needed = data.len() + 4;
+
+        if self.force {
+            while self.buf.bytes_unused() < needed && !self.buf.empty() {
+                self.buf.pop_front();
+            }
+            if self.buf.bytes_unused() < needed {
+                return Err(NotEnoughSpaceError);
+            }
+        } else if self.buf.bytes_unused() < needed {
+            return Err(NotEnoughSpaceError);
+        }
+
+        write_wrapping(&mut self.buf.buffer, self.buf.head, data);
+        self.buf.head = add_wrapping::<N>(self.buf.head, data.len());
+        self.len += data.len();
+
+        Ok(())
+    }
+
+    /// Discards the in-progress packet without committing it to the ring buffer.
+    ///
+    /// Rewinds `head` to the position it had before [`BytearrayRingbuffer::push_multipart`] was
+    /// called. Any packets that were already dropped in force mode are permanently lost.
+    pub fn cancel(mut self) {
+        self.cancelled = true;
+        self.buf.head = self.start;
+        // Drop runs but the cancelled flag prevents committing.
+    }
+}
+
+impl<'a, const N: usize> Drop for MultipartPush<'a, N> {
+    fn drop(&mut self) {
+        if self.cancelled {
+            return;
+        }
+        let len_bytes: [u8; 4] = (self.len as u32).to_ne_bytes();
+        // Write header at the reserved slot.
+        write_wrapping(&mut self.buf.buffer, self.start, &len_bytes);
+        // Write footer immediately after the payload (current head).
+        write_wrapping(&mut self.buf.buffer, self.buf.head, &len_bytes);
+        self.buf.head = add_wrapping::<N>(self.buf.head, 4);
+        self.buf.count += 1;
+    }
+}
+
 impl<const N: usize> BytearrayRingbuffer<N> {
     /// Creates an empty ring buffer.
     ///
@@ -79,6 +173,55 @@ impl<const N: usize> BytearrayRingbuffer<N> {
     /// Returns [`NotEnoughSpaceError`] only when `data.len() > N - 8` (one frame cannot fit at all).
     pub fn push_force(&mut self, data: &[u8]) -> Result<(), NotEnoughSpaceError> {
         self._push(data, true)
+    }
+
+    /// Begins a multi-part push in normal mode.
+    ///
+    /// Returns a [`MultipartPush`] guard whose [`MultipartPush::push`] method appends chunks of
+    /// payload. When the guard is dropped the completed packet is committed. Call
+    /// [`MultipartPush::cancel`] to discard the write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotEnoughSpaceError`] if there are fewer than 8 unused bytes (not enough for even
+    /// an empty packet).
+    pub fn push_multipart(&mut self) -> Result<MultipartPush<'_, N>, NotEnoughSpaceError> {
+        // Need at least 8 bytes for the header + footer of an empty packet.
+        if self.bytes_unused() < 8 {
+            return Err(NotEnoughSpaceError);
+        }
+        let start = self.head;
+        self.head = add_wrapping::<N>(self.head, 4);
+        Ok(MultipartPush {
+            buf: self,
+            start,
+            len: 0,
+            force: false,
+            cancelled: false,
+        })
+    }
+
+    /// Begins a multi-part push in force mode.
+    ///
+    /// Like [`Self::push_multipart`] but drops the oldest packets as needed to make room. Dropped
+    /// packets are permanently lost even if the write is later cancelled.
+    ///
+    /// Returns a [`MultipartPush`] guard. Calling [`MultipartPush::push`] will drop further old
+    /// packets on demand.
+    pub fn push_multipart_force(&mut self) -> MultipartPush<'_, N> {
+        // Ensure there are at least 8 bytes free for an empty packet.
+        while self.bytes_unused() < 8 && !self.empty() {
+            self.pop_front();
+        }
+        let start = self.head;
+        self.head = add_wrapping::<N>(self.head, 4);
+        MultipartPush {
+            buf: self,
+            start,
+            len: 0,
+            force: true,
+            cancelled: false,
+        }
     }
 
     /// Returns `true` if there are no packets stored.
@@ -607,6 +750,191 @@ mod tests {
                 out.extend_from_slice(b);
                 assert_eq!(out.as_slice(), r);
             }
+        }
+    }
+
+    // ---- multipart push tests ----
+
+    fn collect(a: &[u8], b: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(a);
+        v.extend_from_slice(b);
+        v
+    }
+
+    #[test]
+    fn multipart_normal_fits() {
+        const N: usize = 64;
+        for offset in 0..N {
+            let mut buf = BytearrayRingbuffer::<N>::new();
+            buf.head = offset;
+            buf.tail = offset;
+
+            let mut mp = buf.push_multipart().unwrap();
+            mp.push(b"hello").unwrap();
+            mp.push(b" ").unwrap();
+            mp.push(b"world").unwrap();
+            drop(mp);
+
+            assert_eq!(buf.count(), 1);
+            let (a, b) = buf.pop_front().unwrap();
+            assert_eq!(collect(a, b), b"hello world");
+            assert_eq!(buf.count(), 0);
+        }
+    }
+
+    #[test]
+    fn multipart_empty_packet() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        let mp = buf.push_multipart().unwrap();
+        drop(mp); // no push calls
+        assert_eq!(buf.count(), 1);
+        let (a, b) = buf.pop_front().unwrap();
+        assert_eq!(collect(a, b), b"");
+    }
+
+    #[test]
+    fn multipart_normal_overflow_returns_err() {
+        // Buffer: 24 bytes. One existing packet of 8 bytes (payload 0, 8 bytes overhead).
+        // That leaves 16 bytes unused. Starting multipart reserves 4 for the header → 12 bytes
+        // free for payload+footer. First push of 4 bytes is fine (leaves 8 for footer). Second
+        // push of 5 bytes should fail (needs 9 for data+footer, only 8 remain).
+        let mut buf = BytearrayRingbuffer::<24>::new();
+        buf.push(b"").unwrap(); // occupies 8 bytes, leaving 16 unused
+
+        let mut mp = buf.push_multipart().unwrap();
+        mp.push(b"abcd").unwrap(); // 4 bytes payload + 4 footer still needed → OK
+        let err = mp.push(b"12345"); // would need 9 bytes (5 data + 4 footer), only 8 unused → Err
+        assert!(err.is_err());
+
+        // The guard is still usable; drop it and confirm the partial write is committed.
+        drop(mp);
+        assert_eq!(buf.count(), 2);
+        // The committed packet contains only the first successful chunk.
+        let (a, b) = buf.nth(1).unwrap();
+        assert_eq!(collect(a, b), b"abcd");
+    }
+
+    #[test]
+    fn multipart_cancel_normal_mode() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        let original_unused = buf.bytes_unused();
+        let original_count = buf.count();
+
+        let mut mp = buf.push_multipart().unwrap();
+        mp.push(b"data that will be discarded").unwrap();
+        mp.cancel();
+
+        assert_eq!(buf.count(), original_count);
+        assert_eq!(buf.bytes_unused(), original_unused);
+    }
+
+    #[test]
+    fn multipart_normal_no_room_for_start() {
+        // 24 - 8 = 16 max payload; filling with 16 bytes leaves 0 bytes unused.
+        let mut buf = BytearrayRingbuffer::<24>::new();
+        buf.push(&[0u8; 16]).unwrap(); // fills entire buffer
+        assert_eq!(buf.bytes_unused(), 0);
+        assert!(buf.push_multipart().is_err());
+    }
+
+    #[test]
+    fn multipart_force_drops_old_packets() {
+        // Buffer: 24 bytes. Push two 2-byte packets (10 bytes each → 20 used, 4 free).
+        // push_multipart_force initially pops "AA" to get 8+ bytes for the header reservation.
+        // Then push "hello world" (11 bytes) needs 11+4=15 bytes; only 10 available after the
+        // header reservation, so "BB" is also dropped, leaving 24 bytes free.
+        let mut buf = BytearrayRingbuffer::<24>::new();
+        buf.push(b"AA").unwrap(); // 10 bytes
+        buf.push(b"BB").unwrap(); // 10 bytes → 20 bytes used, 4 bytes free
+        assert_eq!(buf.count(), 2);
+
+        let mut mp = buf.push_multipart_force();
+        mp.push(b"hello world").unwrap(); // 11+4=15 needed; forces drop of both old packets
+        drop(mp);
+
+        assert_eq!(buf.count(), 1);
+        let (a, b) = buf.pop_front().unwrap();
+        assert_eq!(collect(a, b), b"hello world");
+    }
+
+    #[test]
+    fn multipart_force_cancel_drops_are_permanent() {
+        // Same setup as multipart_force_drops_old_packets but we cancel instead of committing.
+        let mut buf = BytearrayRingbuffer::<24>::new();
+        buf.push(b"AA").unwrap();
+        buf.push(b"BB").unwrap();
+        let count_before = buf.count(); // 2
+
+        let mut mp = buf.push_multipart_force();
+        mp.push(b"hello world").unwrap(); // forces drops of both "AA" and "BB"
+        mp.cancel(); // discard the new packet
+
+        // New packet is not committed, but both dropped packets are permanently gone.
+        assert!(buf.count() < count_before);
+        assert_eq!(buf.count(), 0);
+    }
+
+    #[test]
+    fn multipart_push_after_multipart() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        {
+            let mut mp = buf.push_multipart().unwrap();
+            mp.push(b"first").unwrap();
+        }
+        buf.push(b"second").unwrap();
+
+        assert_eq!(buf.count(), 2);
+        let (a, b) = buf.nth(0).unwrap();
+        assert_eq!(collect(a, b), b"first");
+        let (a, b) = buf.nth(1).unwrap();
+        assert_eq!(collect(a, b), b"second");
+    }
+
+    #[test]
+    fn multipart_force_max_payload() {
+        // Push exactly N-8 bytes in force mode.
+        const N: usize = 32;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.push(b"old").unwrap(); // will be displaced
+
+        let payload: Vec<u8> = (0..((N - 8) as u8)).collect();
+        let mut mp = buf.push_multipart_force();
+        mp.push(&payload).unwrap();
+        drop(mp);
+
+        assert_eq!(buf.count(), 1);
+        let (a, b) = buf.pop_front().unwrap();
+        assert_eq!(collect(a, b), payload);
+    }
+
+    #[test]
+    fn multipart_wraparound_all_offsets() {
+        const N: usize = 48;
+        for offset in 0..N {
+            let mut buf = BytearrayRingbuffer::<N>::new();
+            buf.head = offset;
+            buf.tail = offset;
+
+            // Push a normal packet first.
+            buf.push(b"prefix").unwrap();
+
+            // Multi-part push with two chunks that together wrap the ring.
+            let mut mp = buf.push_multipart().unwrap();
+            mp.push(b"foo").unwrap();
+            mp.push(b"bar").unwrap();
+            drop(mp);
+
+            // Push another after.
+            buf.push(b"suffix").unwrap();
+
+            assert_eq!(buf.count(), 3);
+            let (a, b) = buf.nth(0).unwrap();
+            assert_eq!(collect(a, b), b"prefix");
+            let (a, b) = buf.nth(1).unwrap();
+            assert_eq!(collect(a, b), b"foobar");
+            let (a, b) = buf.nth(2).unwrap();
+            assert_eq!(collect(a, b), b"suffix");
         }
     }
 }

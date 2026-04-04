@@ -42,6 +42,27 @@ for (a, b) in buffer.iter() {
 }
 ```
 
+### Multipart push
+
+When the full payload is not available up-front, use `push_multipart` (or `push_multipart_force`) to build a packet incrementally:
+
+```rust
+use bytearray_ringbuffer::BytearrayRingbuffer;
+let mut buffer = BytearrayRingbuffer::<64>::new();
+// begin an in-progress packet
+let mut mp = buffer.push_multipart().unwrap();
+mp.push(b"hello").unwrap();
+mp.push(b" world").unwrap();
+drop(mp); // commits the packet "hello world"
+assert_eq!(buffer.count(), 1);
+
+// or discard the in-progress write:
+let mut mp = buffer.push_multipart().unwrap();
+mp.push(b"discarded").unwrap();
+mp.cancel(); // head is rewound; count is unchanged
+assert_eq!(buffer.count(), 1);
+```
+
 ## Performance
 The tradeoff here is that random access by index (`nth`, `nth_reverse`, `nth_contiguous`) walks packets from an end of the queue, so it is linear in the number of packets skipped.
 
@@ -49,6 +70,8 @@ The tradeoff here is that random access by index (`nth`, `nth_reverse`, `nth_con
 |---------|---------------|
 |`push()` | O(1)
 |`push_force()` | O(1) amortized per push; worst case O(m) if m oldest packets are dropped to make room
+|`push_multipart()` | O(1) to create the guard; each `push` call is O(1); `drop`/`cancel` is O(1)
+|`push_multipart_force()` | O(1) to create the guard; each `push` call is O(1) amortized; `drop`/`cancel` is O(1)
 |`pop_front()` | O(1)
 |`iter()` / `iter_backwards()` | O(1) to create the iterator; O(1) per `next()`; O(k) to visit all k packets
 |`count()` | O(1)

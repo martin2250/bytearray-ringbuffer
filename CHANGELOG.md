@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `push_multipart()` and `push_multipart_force()` methods that return a `MultipartPush<'_, N>` guard, allowing a packet to be built incrementally across multiple `push` calls. The packet is committed when the guard is dropped. Call `cancel(self)` to discard the in-progress write without committing a packet (the head is rewound; in force mode any packets already displaced are permanently lost).
+
 ## [0.3.1] - 2026-04-02
 
 ### Changed
