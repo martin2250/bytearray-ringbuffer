@@ -55,7 +55,11 @@ impl<'a> Packet<'a> {
     ///
     /// Panics if `buffer.len() != self.a.len() + self.b.len()`.
     pub fn copy_into(&self, buffer: &mut [u8]) {
-        assert_eq!(buffer.len(), self.len(), "buffer length must equal packet length");
+        assert_eq!(
+            buffer.len(),
+            self.len(),
+            "buffer length must equal packet length"
+        );
         buffer[..self.a.len()].copy_from_slice(self.a);
         buffer[self.a.len()..].copy_from_slice(self.b);
     }
@@ -68,11 +72,12 @@ impl<'a> Packet<'a> {
     ///
     /// Panics if `buffer.len() != range.len()` or if `range.end > self.a.len() + self.b.len()`.
     pub fn copy_part_into(&self, range: core::ops::Range<usize>, buffer: &mut [u8]) {
-        assert_eq!(buffer.len(), range.len(), "buffer length must equal range length");
-        assert!(
-            range.end <= self.len(),
-            "range out of bounds"
+        assert_eq!(
+            buffer.len(),
+            range.len(),
+            "buffer length must equal range length"
         );
+        assert!(range.end <= self.len(), "range out of bounds");
 
         let start = range.start;
         let end = range.end;
@@ -510,7 +515,10 @@ impl<'a, const N: usize> Iterator for IterBackwards<'a, N> {
         self.head = sub_wrapping::<N>(self.head, 8 + len_data);
         self.count -= 1;
 
-        Some(Packet { a: slice_a, b: slice_b })
+        Some(Packet {
+            a: slice_a,
+            b: slice_b,
+        })
     }
 }
 
@@ -565,7 +573,10 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
         self.tail = add_wrapping::<N>(self.tail, 8 + len_data);
         self.count -= 1;
 
-        Some(Packet { a: slice_a, b: slice_b })
+        Some(Packet {
+            a: slice_a,
+            b: slice_b,
+        })
     }
 }
 
