@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Packet<'a>` struct — a named, borrowed view of a single packet from the ring buffer. Contains two public fields `a: &[u8]` and `b: &[u8]`; `b` is empty when the payload is contiguous.
 - `Packet::len()` — returns the total payload length (`a.len() + b.len()`).
 - `Packet::is_empty()` — returns `true` when the payload is empty.
+- `Packet::copy_into(&self, buffer: &mut [u8])` — copies the full payload into a flat `&mut [u8]`.
+- `Packet::copy_part_into(&self, range: Range<usize>, buffer: &mut [u8])` — copies a sub-range of the payload into a flat `&mut [u8]`.
 - `Packet::extend_into<E: Extend<u8>>(&self, target: &mut E)` — appends the full payload into any `Extend<u8>` collection (e.g. `Vec<u8>`, `heapless::Vec`).
 
 ### Changed
 
-- README usage example updated to demonstrate `len()`, `copy_into`, and `extend_into`.
+- **Breaking:** `pop_front`, `nth`, `nth_reverse`, `iter` (`Iter`), and `iter_backwards` (`IterBackwards`) now return `Packet<'_>` instead of the `(&[u8], &[u8])` tuple. Callers that destructured `(a, b)` should change to `p.a` / `p.b`.
 
 ## [0.4.0] - 2026-04-04
 
