@@ -12,9 +12,10 @@ Each slice `data` uses up `data.len() + 8` bytes in the buffer.
 This is useful for efficiently storing elements of very different lengths, as short elements do not have to be padded.
 
 One downside is that elements may wrap around at the end of the buffer.
-For `pop_front`, `iter`, `iter_backwards`, `nth`, and `nth_reverse`, each element is returned as two slices `(a, b)`.
+For `pop_front`, `iter`, `iter_backwards`, `nth`, and `nth_reverse`, each element is returned as a [`Packet`] with fields `a` and `b`.
 If the element does not wrap around, `a` will contain all data and `b` will be empty.
 Otherwise, `a` and `b` have to be concatenated to yield the full result.
+[`Packet::copy_into`] copies the full payload into a flat buffer, and [`Packet::copy_part_into`] copies a sub-range.
 `nth_contiguous` is the exception: it returns a single `&[u8]` and may rotate the backing array so that slice is contiguous. It returns `None` if the queue is empty or if `n >= count()`.
 
 ## MSRV
@@ -33,11 +34,11 @@ buffer.push(b"testing").unwrap();
 // number of packets
 assert_eq!(buffer.count(), 3);
 // iterate (oldest first; does not remove entries)
-for (a, b) in buffer.iter() {
-    // a and b are &[u8]
+for p in buffer.iter() {
+    // p.a and p.b are &[u8]
     let mut output = Vec::new();
-    output.extend_from_slice(a);
-    output.extend_from_slice(b);
+    output.extend_from_slice(p.a);
+    output.extend_from_slice(p.b);
     // now output contains the original elements
 }
 ```
