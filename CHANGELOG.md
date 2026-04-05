@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-04-05
+
+### Added
+
+- `Packet::len()` — returns the total payload length (`a.len() + b.len()`).
+- `Packet::is_empty()` — returns `true` when the payload is empty.
+- `Packet::extend_into<E: Extend<u8>>(&self, target: &mut E)` — appends the full payload into any `Extend<u8>` collection (e.g. `Vec<u8>`, `heapless::Vec`).
+
+### Changed
+
+- README usage example updated to demonstrate `len()`, `copy_into`, and `extend_into`.
+
 ## [0.4.0] - 2026-04-04
 
 ### Added
