@@ -39,14 +39,23 @@ pub struct Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
+    /// Returns the total length of the packet payload (`a.len() + b.len()`).
+    pub fn len(&self) -> usize {
+        self.a.len() + self.b.len()
+    }
+
+    /// Returns `true` if the packet payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.a.is_empty() && self.b.is_empty()
+    }
+
     /// Copies the full packet payload into `buffer`.
     ///
     /// # Panics
     ///
     /// Panics if `buffer.len() != self.a.len() + self.b.len()`.
     pub fn copy_into(&self, buffer: &mut [u8]) {
-        let total = self.a.len() + self.b.len();
-        assert_eq!(buffer.len(), total, "buffer length must equal packet length");
+        assert_eq!(buffer.len(), self.len(), "buffer length must equal packet length");
         buffer[..self.a.len()].copy_from_slice(self.a);
         buffer[self.a.len()..].copy_from_slice(self.b);
     }
@@ -61,7 +70,7 @@ impl<'a> Packet<'a> {
     pub fn copy_part_into(&self, range: core::ops::Range<usize>, buffer: &mut [u8]) {
         assert_eq!(buffer.len(), range.len(), "buffer length must equal range length");
         assert!(
-            range.end <= self.a.len() + self.b.len(),
+            range.end <= self.len(),
             "range out of bounds"
         );
 
@@ -85,6 +94,16 @@ impl<'a> Packet<'a> {
             let chunk = &self.b[b_start..b_end];
             buffer[buf_pos..buf_pos + chunk.len()].copy_from_slice(chunk);
         }
+    }
+
+    /// Extends `target` with the full packet payload.
+    ///
+    /// Appends the bytes from `a` followed by `b` to `target`. Works with any collection
+    /// that implements [`Extend<u8>`](core::iter::Extend), such as `Vec<u8>` or
+    /// `heapless::Vec<u8, N>`.
+    pub fn extend_into<E: Extend<u8>>(&self, target: &mut E) {
+        target.extend(self.a.iter().copied());
+        target.extend(self.b.iter().copied());
     }
 }
 
@@ -1371,5 +1390,38 @@ mod tests {
         let p = buf.pop_front().unwrap();
         let mut out = [0u8; 2];
         p.copy_part_into(4..6, &mut out); // end=6 > total=5
+    }
+
+    // ---- Packet::len / is_empty ----
+
+    #[test]
+    fn packet_len_contiguous() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert_eq!(p.len(), 5);
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn packet_len_wrapped() {
+        const N: usize = 16;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.head = 9;
+        buf.tail = 9;
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert!(!p.b.is_empty(), "expected a wrapped packet");
+        assert_eq!(p.len(), 5);
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn packet_len_empty_payload() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert_eq!(p.len(), 0);
+        assert!(p.is_empty());
     }
 }
