@@ -7,7 +7,7 @@
 /// Each stored packet uses `data.len() + 8` bytes: a leading `u32` length (native endian), the
 /// payload, then the same length again. The queue is a ring: `head` is where the next `push` writes;
 /// `tail` is the oldest packet. Payloads may wrap across the end of the array; most accessors return
-/// two slices `(a, b)` that concatenate to the full packet.
+/// a [`Packet`] whose slices `a` and `b` concatenate to the full payload.
 ///
 /// The backing array is only modified by this crate's own logic (the field is private). Methods
 /// maintain consistent framing; [`Self::pop_front`] and iterators rely on that.
@@ -21,6 +21,95 @@ pub struct BytearrayRingbuffer<const N: usize> {
     tail: usize,
     /// Number of packets currently stored.
     count: usize,
+}
+
+/// A borrowed view of a single packet from the ring buffer.
+///
+/// Because a packet's payload may wrap across the end of the backing array, it is represented as
+/// two contiguous slices. `a` is the first (or only) part of the payload; `b` is the second part
+/// and is empty when the payload is contiguous.
+///
+/// Use [`Self::copy_into`] or [`Self::copy_part_into`] to copy the payload into a flat buffer.
+#[derive(Debug, PartialEq)]
+pub struct Packet<'a> {
+    /// First (or only) slice of the packet payload.
+    pub a: &'a [u8],
+    /// Second slice of the packet payload; empty when the payload is contiguous.
+    pub b: &'a [u8],
+}
+
+impl<'a> Packet<'a> {
+    /// Returns the total length of the packet payload (`a.len() + b.len()`).
+    pub fn len(&self) -> usize {
+        self.a.len() + self.b.len()
+    }
+
+    /// Returns `true` if the packet payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.a.is_empty() && self.b.is_empty()
+    }
+
+    /// Copies the full packet payload into `buffer`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buffer.len() != self.a.len() + self.b.len()`.
+    pub fn copy_into(&self, buffer: &mut [u8]) {
+        assert_eq!(
+            buffer.len(),
+            self.len(),
+            "buffer length must equal packet length"
+        );
+        buffer[..self.a.len()].copy_from_slice(self.a);
+        buffer[self.a.len()..].copy_from_slice(self.b);
+    }
+
+    /// Copies the bytes in `range` of the packet payload into `buffer`.
+    ///
+    /// The range is interpreted over the logical concatenation `[a | b]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buffer.len() != range.len()` or if `range.end > self.a.len() + self.b.len()`.
+    pub fn copy_part_into(&self, range: core::ops::Range<usize>, buffer: &mut [u8]) {
+        assert_eq!(
+            buffer.len(),
+            range.len(),
+            "buffer length must equal range length"
+        );
+        assert!(range.end <= self.len(), "range out of bounds");
+
+        let start = range.start;
+        let end = range.end;
+        let a_len = self.a.len();
+        let mut buf_pos = 0;
+
+        // Copy the portion of `a` that falls within [start, end).
+        if start < a_len {
+            let a_end = end.min(a_len);
+            let chunk = &self.a[start..a_end];
+            buffer[buf_pos..buf_pos + chunk.len()].copy_from_slice(chunk);
+            buf_pos += chunk.len();
+        }
+
+        // Copy the portion of `b` that falls within [start, end).
+        if end > a_len {
+            let b_start = start.saturating_sub(a_len);
+            let b_end = end.saturating_sub(a_len);
+            let chunk = &self.b[b_start..b_end];
+            buffer[buf_pos..buf_pos + chunk.len()].copy_from_slice(chunk);
+        }
+    }
+
+    /// Extends `target` with the full packet payload.
+    ///
+    /// Appends the bytes from `a` followed by `b` to `target`. Works with any collection
+    /// that implements [`Extend<u8>`](core::iter::Extend), such as `Vec<u8>` or
+    /// `heapless::Vec<u8, N>`.
+    pub fn extend_into<E: Extend<u8>>(&self, target: &mut E) {
+        target.extend(self.a.iter().copied());
+        target.extend(self.b.iter().copied());
+    }
 }
 
 /// Returned when a [`BytearrayRingbuffer::push`] cannot store `data` without dropping older packets.
@@ -276,9 +365,9 @@ impl<const N: usize> BytearrayRingbuffer<N> {
 
     /// Removes and returns the oldest packet.
     ///
-    /// The payload may be split across the end of the backing array; concatenate the two slices to
-    /// reconstruct `data`. If the payload is contiguous, the second slice is empty.
-    pub fn pop_front(&mut self) -> Option<(&[u8], &[u8])> {
+    /// The payload may be split across the end of the backing array; use [`Packet::copy_into`] or
+    /// access [`Packet::a`] and [`Packet::b`] directly. If the payload is contiguous, `b` is empty.
+    pub fn pop_front(&mut self) -> Option<Packet<'_>> {
         if self.empty() {
             return None;
         }
@@ -297,7 +386,7 @@ impl<const N: usize> BytearrayRingbuffer<N> {
 
         self.tail = add_wrapping::<N>(self.tail, len + 8);
         self.count -= 1;
-        Some((a, b))
+        Some(Packet { a, b })
     }
 
     /// Borrows the buffer and yields packets from newest to oldest.
@@ -328,14 +417,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
     /// Returns the `n`-th packet in oldest-to-newest order (`n == 0` is the oldest).
     ///
     /// Same as [`Iterator::nth`] on [`Self::iter`].
-    pub fn nth(&self, n: usize) -> Option<(&[u8], &[u8])> {
+    pub fn nth(&self, n: usize) -> Option<Packet<'_>> {
         self.iter().nth(n)
     }
 
     /// Returns the `n`-th packet in newest-to-oldest order (`n == 0` is the newest).
     ///
     /// Same as [`Iterator::nth`] on [`Self::iter_backwards`].
-    pub fn nth_reverse(&self, n: usize) -> Option<(&[u8], &[u8])> {
+    pub fn nth_reverse(&self, n: usize) -> Option<Packet<'_>> {
         self.iter_backwards().nth(n)
     }
 
@@ -390,7 +479,7 @@ pub struct IterBackwards<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> Iterator for IterBackwards<'a, N> {
-    type Item = (&'a [u8], &'a [u8]);
+    type Item = Packet<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == 0 {
@@ -426,7 +515,10 @@ impl<'a, const N: usize> Iterator for IterBackwards<'a, N> {
         self.head = sub_wrapping::<N>(self.head, 8 + len_data);
         self.count -= 1;
 
-        Some((slice_a, slice_b))
+        Some(Packet {
+            a: slice_a,
+            b: slice_b,
+        })
     }
 }
 
@@ -445,7 +537,7 @@ pub struct Iter<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> Iterator for Iter<'a, N> {
-    type Item = (&'a [u8], &'a [u8]);
+    type Item = Packet<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == 0 {
@@ -481,7 +573,10 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
         self.tail = add_wrapping::<N>(self.tail, 8 + len_data);
         self.count -= 1;
 
-        Some((slice_a, slice_b))
+        Some(Packet {
+            a: slice_a,
+            b: slice_b,
+        })
     }
 }
 
@@ -610,10 +705,10 @@ mod tests {
             let data = b"01234567";
             buf.push(data).unwrap();
 
-            let (a, b) = buf.pop_front().unwrap();
+            let p = buf.pop_front().unwrap();
             let mut out = Vec::new();
-            out.extend_from_slice(a);
-            out.extend_from_slice(b);
+            out.extend_from_slice(p.a);
+            out.extend_from_slice(p.b);
 
             dbg!(out.as_slice());
             assert!(data == out.as_slice());
@@ -640,10 +735,10 @@ mod tests {
             // test forward iteration
             let mut it = buf.iter();
             for &d in data.iter() {
-                let (a, b) = it.next().unwrap();
+                let p = it.next().unwrap();
                 let mut ab = Vec::new();
-                ab.extend_from_slice(a);
-                ab.extend_from_slice(b);
+                ab.extend_from_slice(p.a);
+                ab.extend_from_slice(p.b);
                 let ab = ab.as_slice();
                 assert_eq!(d, ab);
             }
@@ -652,10 +747,10 @@ mod tests {
             // test backward iteration
             let mut it = buf.iter_backwards();
             for &d in data.iter().rev() {
-                let (a, b) = it.next().unwrap();
+                let p = it.next().unwrap();
                 let mut ab = Vec::new();
-                ab.extend_from_slice(a);
-                ab.extend_from_slice(b);
+                ab.extend_from_slice(p.a);
+                ab.extend_from_slice(p.b);
                 let ab = ab.as_slice();
                 assert_eq!(d, ab);
             }
@@ -689,12 +784,12 @@ mod tests {
             buf.push_force(word.as_bytes()).unwrap();
             current_words.push_back(word);
 
-            for (a, b) in buf.iter_backwards().zip(current_words.iter().rev()) {
-                eprintln!("read back {b:?}");
+            for (p, word) in buf.iter_backwards().zip(current_words.iter().rev()) {
+                eprintln!("read back {word:?}");
                 let mut st = String::new();
-                st.push_str(core::str::from_utf8(a.0).unwrap());
-                st.push_str(core::str::from_utf8(a.1).unwrap());
-                assert_eq!(st, *b);
+                st.push_str(core::str::from_utf8(p.a).unwrap());
+                st.push_str(core::str::from_utf8(p.b).unwrap());
+                assert_eq!(st, *word);
             }
         }
     }
@@ -744,10 +839,10 @@ mod tests {
             assert_eq!(data[1], read);
 
             // check if the contents are still the same
-            for (&r, (a, b)) in data.iter().zip(buf.iter()) {
+            for (&r, p) in data.iter().zip(buf.iter()) {
                 let mut out = Vec::new();
-                out.extend_from_slice(a);
-                out.extend_from_slice(b);
+                out.extend_from_slice(p.a);
+                out.extend_from_slice(p.b);
                 assert_eq!(out.as_slice(), r);
             }
         }
@@ -777,8 +872,8 @@ mod tests {
             drop(mp);
 
             assert_eq!(buf.count(), 1);
-            let (a, b) = buf.pop_front().unwrap();
-            assert_eq!(collect(a, b), b"hello world");
+            let p = buf.pop_front().unwrap();
+            assert_eq!(collect(p.a, p.b), b"hello world");
             assert_eq!(buf.count(), 0);
         }
     }
@@ -789,8 +884,8 @@ mod tests {
         let mp = buf.push_multipart().unwrap();
         drop(mp); // no push calls
         assert_eq!(buf.count(), 1);
-        let (a, b) = buf.pop_front().unwrap();
-        assert_eq!(collect(a, b), b"");
+        let p = buf.pop_front().unwrap();
+        assert_eq!(collect(p.a, p.b), b"");
     }
 
     #[test]
@@ -811,8 +906,8 @@ mod tests {
         drop(mp);
         assert_eq!(buf.count(), 2);
         // The committed packet contains only the first successful chunk.
-        let (a, b) = buf.nth(1).unwrap();
-        assert_eq!(collect(a, b), b"abcd");
+        let p = buf.nth(1).unwrap();
+        assert_eq!(collect(p.a, p.b), b"abcd");
     }
 
     #[test]
@@ -854,8 +949,8 @@ mod tests {
         drop(mp);
 
         assert_eq!(buf.count(), 1);
-        let (a, b) = buf.pop_front().unwrap();
-        assert_eq!(collect(a, b), b"hello world");
+        let p = buf.pop_front().unwrap();
+        assert_eq!(collect(p.a, p.b), b"hello world");
     }
 
     #[test]
@@ -885,10 +980,10 @@ mod tests {
         buf.push(b"second").unwrap();
 
         assert_eq!(buf.count(), 2);
-        let (a, b) = buf.nth(0).unwrap();
-        assert_eq!(collect(a, b), b"first");
-        let (a, b) = buf.nth(1).unwrap();
-        assert_eq!(collect(a, b), b"second");
+        let p = buf.nth(0).unwrap();
+        assert_eq!(collect(p.a, p.b), b"first");
+        let p = buf.nth(1).unwrap();
+        assert_eq!(collect(p.a, p.b), b"second");
     }
 
     #[test]
@@ -904,8 +999,8 @@ mod tests {
         drop(mp);
 
         assert_eq!(buf.count(), 1);
-        let (a, b) = buf.pop_front().unwrap();
-        assert_eq!(collect(a, b), payload);
+        let p = buf.pop_front().unwrap();
+        assert_eq!(collect(p.a, p.b), payload);
     }
 
     #[test]
@@ -929,12 +1024,12 @@ mod tests {
             buf.push(b"suffix").unwrap();
 
             assert_eq!(buf.count(), 3);
-            let (a, b) = buf.nth(0).unwrap();
-            assert_eq!(collect(a, b), b"prefix");
-            let (a, b) = buf.nth(1).unwrap();
-            assert_eq!(collect(a, b), b"foobar");
-            let (a, b) = buf.nth(2).unwrap();
-            assert_eq!(collect(a, b), b"suffix");
+            let p = buf.nth(0).unwrap();
+            assert_eq!(collect(p.a, p.b), b"prefix");
+            let p = buf.nth(1).unwrap();
+            assert_eq!(collect(p.a, p.b), b"foobar");
+            let p = buf.nth(2).unwrap();
+            assert_eq!(collect(p.a, p.b), b"suffix");
         }
     }
 
@@ -1044,12 +1139,12 @@ mod tests {
         buf.push(b"middle").unwrap();
         buf.push(b"newest").unwrap();
 
-        let (a, b) = buf.nth_reverse(0).unwrap();
-        assert_eq!(collect(a, b), b"newest");
-        let (a, b) = buf.nth_reverse(1).unwrap();
-        assert_eq!(collect(a, b), b"middle");
-        let (a, b) = buf.nth_reverse(2).unwrap();
-        assert_eq!(collect(a, b), b"oldest");
+        let p = buf.nth_reverse(0).unwrap();
+        assert_eq!(collect(p.a, p.b), b"newest");
+        let p = buf.nth_reverse(1).unwrap();
+        assert_eq!(collect(p.a, p.b), b"middle");
+        let p = buf.nth_reverse(2).unwrap();
+        assert_eq!(collect(p.a, p.b), b"oldest");
     }
 
     #[test]
@@ -1117,9 +1212,9 @@ mod tests {
             // Forward iteration must still be consistent.
             let payloads: Vec<Vec<u8>> = buf
                 .iter()
-                .map(|(a, b)| {
-                    let mut v = a.to_vec();
-                    v.extend_from_slice(b);
+                .map(|p| {
+                    let mut v = p.a.to_vec();
+                    v.extend_from_slice(p.b);
                     v
                 })
                 .collect();
@@ -1161,8 +1256,8 @@ mod tests {
 
         // Only the newly pushed packet must survive.
         assert_eq!(buf.count(), 1);
-        let (a, b) = buf.pop_front().unwrap();
-        assert_eq!(collect(a, b), payload);
+        let p = buf.pop_front().unwrap();
+        assert_eq!(collect(p.a, p.b), payload);
     }
 
     // ---- multipart: total payload exceeds N-8 ----
@@ -1178,8 +1273,8 @@ mod tests {
         assert!(err.is_err());
         drop(mp); // commits the 5-byte partial packet
         assert_eq!(buf.count(), 1);
-        let (a, b) = buf.pop_front().unwrap();
-        assert_eq!(collect(a, b), b"abcde");
+        let p = buf.pop_front().unwrap();
+        assert_eq!(collect(p.a, p.b), b"abcde");
     }
 
     // ---- push_multipart_force starting from a completely full buffer ----
@@ -1197,7 +1292,147 @@ mod tests {
         drop(mp);
 
         assert_eq!(buf.count(), 1);
-        let (a, b) = buf.pop_front().unwrap();
-        assert_eq!(collect(a, b), b"hi");
+        let p = buf.pop_front().unwrap();
+        assert_eq!(collect(p.a, p.b), b"hi");
+    }
+
+    // ---- Packet::copy_into ----
+
+    #[test]
+    fn copy_into_contiguous() {
+        // Packet starting at offset 0: payload lies in a single contiguous slice (b is empty).
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert!(p.b.is_empty());
+        let mut out = [0u8; 5];
+        p.copy_into(&mut out);
+        assert_eq!(&out, b"hello");
+    }
+
+    #[test]
+    fn copy_into_wrapped() {
+        // N=16, head=tail=9: a 5-byte payload wraps (3 bytes at end, 2 bytes at start).
+        const N: usize = 16;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.head = 9;
+        buf.tail = 9;
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert!(!p.b.is_empty(), "expected a wrapped packet");
+        let mut out = [0u8; 5];
+        p.copy_into(&mut out);
+        assert_eq!(&out, b"abcde");
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer length must equal packet length")]
+    fn copy_into_wrong_length_panics() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 4]; // one byte too short
+        p.copy_into(&mut out);
+    }
+
+    // ---- Packet::copy_part_into ----
+
+    #[test]
+    fn copy_part_into_in_a() {
+        // Range fully within the first slice.
+        // N=16, head=tail=9: a="abc" (3 bytes), b="de" (2 bytes).
+        const N: usize = 16;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.head = 9;
+        buf.tail = 9;
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert!(!p.b.is_empty(), "expected a wrapped packet");
+        let mut out = [0u8; 2];
+        p.copy_part_into(0..2, &mut out);
+        assert_eq!(&out, b"ab");
+    }
+
+    #[test]
+    fn copy_part_into_in_b() {
+        // Range fully within the second slice.
+        // a="abc" (3 bytes), b="de" (2 bytes); range 3..4 selects "d".
+        const N: usize = 16;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.head = 9;
+        buf.tail = 9;
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 1];
+        p.copy_part_into(3..4, &mut out);
+        assert_eq!(&out, b"d");
+    }
+
+    #[test]
+    fn copy_part_into_spanning() {
+        // Range spanning the boundary between a and b.
+        // a="abc" (3 bytes), b="de" (2 bytes); range 1..4 selects "bcd".
+        const N: usize = 16;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.head = 9;
+        buf.tail = 9;
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 3];
+        p.copy_part_into(1..4, &mut out);
+        assert_eq!(&out, b"bcd");
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer length must equal range length")]
+    fn copy_part_into_wrong_buffer_length_panics() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 3]; // range is 0..2 (2 bytes) but buffer is 3 bytes
+        p.copy_part_into(0..2, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "range out of bounds")]
+    fn copy_part_into_out_of_bounds_panics() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap(); // 5 bytes
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 2];
+        p.copy_part_into(4..6, &mut out); // end=6 > total=5
+    }
+
+    // ---- Packet::len / is_empty ----
+
+    #[test]
+    fn packet_len_contiguous() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"hello").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert_eq!(p.len(), 5);
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn packet_len_wrapped() {
+        const N: usize = 16;
+        let mut buf = BytearrayRingbuffer::<N>::new();
+        buf.head = 9;
+        buf.tail = 9;
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert!(!p.b.is_empty(), "expected a wrapped packet");
+        assert_eq!(p.len(), 5);
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn packet_len_empty_payload() {
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"").unwrap();
+        let p = buf.pop_front().unwrap();
+        assert_eq!(p.len(), 0);
+        assert!(p.is_empty());
     }
 }

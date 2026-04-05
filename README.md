@@ -12,9 +12,10 @@ Each slice `data` uses up `data.len() + 8` bytes in the buffer.
 This is useful for efficiently storing elements of very different lengths, as short elements do not have to be padded.
 
 One downside is that elements may wrap around at the end of the buffer.
-For `pop_front`, `iter`, `iter_backwards`, `nth`, and `nth_reverse`, each element is returned as two slices `(a, b)`.
+For `pop_front`, `iter`, `iter_backwards`, `nth`, and `nth_reverse`, each element is returned as a [`Packet`] with fields `a` and `b`.
 If the element does not wrap around, `a` will contain all data and `b` will be empty.
 Otherwise, `a` and `b` have to be concatenated to yield the full result.
+[`Packet::len`] returns the total payload length (`a.len() + b.len()`), [`Packet::copy_into`] copies the full payload into a flat `&mut [u8]`, [`Packet::copy_part_into`] copies a sub-range, and [`Packet::extend_into`] appends the payload into any [`Extend<u8>`](core::iter::Extend) collection such as `Vec<u8>`.
 `nth_contiguous` is the exception: it returns a single `&[u8]` and may rotate the backing array so that slice is contiguous. It returns `None` if the queue is empty or if `n >= count()`.
 
 ## MSRV
@@ -26,19 +27,25 @@ Rust **1.85** or later (`edition = "2024"`).
 use bytearray_ringbuffer::BytearrayRingbuffer;
 // Create a buffer with a capacity of 64 bytes.
 let mut buffer = BytearrayRingbuffer::<64>::new();
-// store some packets
+// Store some packets.
 buffer.push(b"hello world").unwrap();
 buffer.push(b"").unwrap();
 buffer.push(b"testing").unwrap();
-// number of packets
+// Number of packets currently stored.
 assert_eq!(buffer.count(), 3);
-// iterate (oldest first; does not remove entries)
-for (a, b) in buffer.iter() {
-    // a and b are &[u8]
-    let mut output = Vec::new();
-    output.extend_from_slice(a);
-    output.extend_from_slice(b);
-    // now output contains the original elements
+
+// Pop the oldest packet and copy it into a flat Vec<u8>.
+let p = buffer.pop_front().unwrap();
+assert_eq!(p.len(), 11); // "hello world"
+let mut out = vec![0u8; p.len()];
+p.copy_into(&mut out);
+assert_eq!(out, b"hello world");
+
+// Iterate oldest-first without removing entries; extend into a Vec<u8>.
+for p in buffer.iter() {
+    let mut collected = Vec::new();
+    p.extend_into(&mut collected); // works with any Extend<u8>
+    // `collected` now contains the full packet payload
 }
 ```
 
