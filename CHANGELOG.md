@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-06
+
+### Changed
+
+- `Packet::copy_part_into` now accepts any `impl RangeBounds<usize>` instead of the concrete `Range<usize>`, enabling callers to use `0..4`, `2..=5`, `3..`, `..3`, `..=2`, and `..` directly.
+
 ## [1.0.0] - 2026-04-05
 
 ### Added

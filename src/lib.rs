@@ -67,20 +67,36 @@ impl<'a> Packet<'a> {
     /// Copies the bytes in `range` of the packet payload into `buffer`.
     ///
     /// The range is interpreted over the logical concatenation `[a | b]`.
+    /// Any type implementing [`RangeBounds<usize>`](core::ops::RangeBounds) is accepted,
+    /// including `0..4`, `2..=5`, `1..`, `..3`, and `..`.
     ///
     /// # Panics
     ///
-    /// Panics if `buffer.len() != range.len()` or if `range.end > self.a.len() + self.b.len()`.
-    pub fn copy_part_into(&self, range: core::ops::Range<usize>, buffer: &mut [u8]) {
+    /// Panics if `buffer.len()` does not equal the length implied by `range`, or if the resolved
+    /// range end exceeds `self.a.len() + self.b.len()`.
+    pub fn copy_part_into(&self, range: impl core::ops::RangeBounds<usize>, buffer: &mut [u8]) {
+        use core::ops::Bound;
+
+        let total = self.len();
+
+        let start = match range.start_bound() {
+            Bound::Included(&s) => s,
+            Bound::Excluded(&s) => s + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&e) => e + 1,
+            Bound::Excluded(&e) => e,
+            Bound::Unbounded => total,
+        };
+
+        assert!(start <= end, "range start must not be greater than end");
         assert_eq!(
             buffer.len(),
-            range.len(),
+            end - start,
             "buffer length must equal range length"
         );
-        assert!(range.end <= self.len(), "range out of bounds");
-
-        let start = range.start;
-        let end = range.end;
+        assert!(end <= total, "range out of bounds");
         let a_len = self.a.len();
         let mut buf_pos = 0;
 
@@ -1401,6 +1417,63 @@ mod tests {
         let p = buf.pop_front().unwrap();
         let mut out = [0u8; 2];
         p.copy_part_into(4..6, &mut out); // end=6 > total=5
+    }
+
+    // ---- Packet::copy_part_into (non-Range variants) ----
+
+    #[test]
+    fn copy_part_into_range_inclusive() {
+        // 1..=3 selects "bcd" from "abcde".
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 3];
+        p.copy_part_into(1..=3, &mut out);
+        assert_eq!(&out, b"bcd");
+    }
+
+    #[test]
+    fn copy_part_into_range_from() {
+        // 3.. selects "de" from "abcde".
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 2];
+        p.copy_part_into(3.., &mut out);
+        assert_eq!(&out, b"de");
+    }
+
+    #[test]
+    fn copy_part_into_range_to() {
+        // ..3 selects "abc" from "abcde".
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 3];
+        p.copy_part_into(..3, &mut out);
+        assert_eq!(&out, b"abc");
+    }
+
+    #[test]
+    fn copy_part_into_range_full() {
+        // .. selects the entire payload "abcde".
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 5];
+        p.copy_part_into(.., &mut out);
+        assert_eq!(&out, b"abcde");
+    }
+
+    #[test]
+    fn copy_part_into_range_to_inclusive() {
+        // ..=2 selects "abc" from "abcde".
+        let mut buf = BytearrayRingbuffer::<64>::new();
+        buf.push(b"abcde").unwrap();
+        let p = buf.pop_front().unwrap();
+        let mut out = [0u8; 3];
+        p.copy_part_into(..=2, &mut out);
+        assert_eq!(&out, b"abc");
     }
 
     // ---- Packet::len / is_empty ----
