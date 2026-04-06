@@ -247,6 +247,14 @@ impl<const N: usize> BytearrayRingbuffer<N> {
         }
     }
 
+    /// Empties the buffer, removing all packets and resetting indices.
+    /// Does not modify the backing array, but all existing data is considered invalid and will be overwritten by future writes.
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+    }
+
     /// Returns the largest payload length that can fit in the currently unused byte range, after
     /// accounting for the 8-byte packet framing (two `u32` lengths).
     ///
